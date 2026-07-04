@@ -116,6 +116,7 @@ static class Program
         string _lastSig = "";
         bool _lastLight;
         int _frame; // working-state animation (FR: low-fps, 4 frames)
+        bool _promoted; // taskbar auto-promotion done for this run
 
         public TrayApp()
         {
@@ -131,6 +132,8 @@ static class Program
 
         void Poll()
         {
+            if (!_promoted) _promoted = TryPromoteToTaskbar();
+
             var live = ReadLive();
             var view = Model.Evaluate(live);
 
@@ -215,6 +218,38 @@ static class Program
                 _lastState[s.SessionId] = s.State;
             }
             foreach (var gone in _lastState.Keys.Where(k => !ids.Contains(k)).ToList()) _lastState.Remove(gone);
+        }
+
+        // Windows 11 hides new tray icons in the overflow with no API to force-show them. But dragging
+        // one to the taskbar just sets IsPromoted=1 under HKCU\Control Panel\NotifyIconSettings\<hash>,
+        // keyed by ExecutablePath. We find our own entry and set it — retried until the entry exists,
+        // and re-done every launch since Windows can mint a fresh entry per run. Best-effort.
+        bool TryPromoteToTaskbar()
+        {
+            try
+            {
+                var exe = Environment.ProcessPath;
+                if (exe is null) return true;
+                if (Path.GetFileName(exe).Equals("dotnet.exe", StringComparison.OrdinalIgnoreCase)) return true; // dev host
+                using var root = Registry.CurrentUser.OpenSubKey(@"Control Panel\NotifyIconSettings", writable: true);
+                if (root is null) return true; // pre-Win11: no such key, nothing to do
+                bool found = false, changed = false;
+                foreach (var sub in root.GetSubKeyNames())
+                {
+                    using var k = root.OpenSubKey(sub, writable: true);
+                    if (k?.GetValue("ExecutablePath") is not string ep) continue;
+                    if (!string.Equals(ep, exe, StringComparison.OrdinalIgnoreCase)) continue;
+                    found = true;
+                    if ((k.GetValue("IsPromoted") as int?) != 1)
+                    {
+                        k.SetValue("IsPromoted", 1, RegistryValueKind.DWord);
+                        changed = true;
+                    }
+                }
+                if (changed) { _icon.Visible = false; _icon.Visible = true; } // re-add so the shell re-reads promotion
+                return found; // keep retrying next tick until Windows has registered our icon
+            }
+            catch { return true; } // give up quietly
         }
 
         Icon IconFor(string state, int frame = 0)
