@@ -33,37 +33,49 @@ static class Model
         _ => 0, // idle, done, unknown
     };
 
-    public sealed record View(string IconState, string Tooltip, List<string> Rows);
+    public sealed record View(string IconState, string Tooltip, List<string> Rows,
+        string TopState, long TopStartedAt);
 
-    // Given the live sessions, pick the icon state, tooltip, and the started-session rows (FR2).
+    static string What(Session s) => string.IsNullOrEmpty(s.Label) ? s.State : s.Label;
+
+    public static string RowLabel(Session s)
+        => $"{(string.IsNullOrEmpty(s.Project) ? "(unknown)" : s.Project)} — {What(s)}";
+
+    // "Xm Ys" elapsed since a turn started (FR3). Pure/testable.
+    public static string Elapsed(long startedAt, long now)
+    {
+        long e = now - startedAt;
+        if (e < 0) e = 0;
+        return $"{e / 60}m {e % 60}s";
+    }
+
+    // Given the live sessions, pick the icon state, base tooltip, and the started-session rows (FR2).
+    // The elapsed timer (time-dependent) is appended by the caller so this stays deterministic.
     public static View Evaluate(IReadOnlyList<Session> live)
     {
         var top = live.OrderByDescending(s => Priority(s.State)).FirstOrDefault();
         string iconState = top?.State ?? "idle";
 
-        string tooltip;
-        if (top is null)
-            tooltip = "Claude: idle";
-        else
-        {
-            string what = string.IsNullOrEmpty(top.Label) ? top.State : top.Label;
-            tooltip = string.IsNullOrEmpty(top.Project) ? $"Claude: {what}" : $"{what} — {top.Project}";
-        }
+        string tooltip = top is null
+            ? "Claude: idle"
+            : (string.IsNullOrEmpty(top.Project) ? $"Claude: {What(top)}" : $"{What(top)} — {top.Project}");
         if (tooltip.Length > 63) tooltip = tooltip[..63]; // NotifyIcon.Text hard limit
 
         var rows = live
             .Where(s => s.Started)
             .OrderByDescending(s => Priority(s.State))
-            .Select(s =>
-            {
-                string what = string.IsNullOrEmpty(s.Label) ? s.State : s.Label;
-                string proj = string.IsNullOrEmpty(s.Project) ? "(unknown)" : s.Project;
-                return $"{proj} — {what}";
-            })
+            .Select(RowLabel)
             .ToList();
 
-        return new View(iconState, tooltip, rows);
+        return new View(iconState, tooltip, rows, iconState, top?.StartedAt ?? 0);
     }
+}
+
+sealed class Settings
+{
+    public bool ShowTimer { get; set; } = true;         // FR6
+    public bool CompletionSound { get; set; } = false;  // FR6: off by default
+    public string IconColor { get; set; } = "Orange";   // FR6: "Orange" | "System"
 }
 
 static class Program
@@ -98,10 +110,14 @@ static class Program
         readonly System.Windows.Forms.Timer _timer;
         readonly Dictionary<string, (DateTime mtime, Session data)> _cache = new();
         readonly Dictionary<string, Icon> _icons = new();
+        readonly Dictionary<string, string> _lastState = new(); // sid -> last state, for done chime
+        readonly Settings _cfg = LoadSettings();
         string _lastSig = "";
+        bool _lastLight;
 
         public TrayApp()
         {
+            _lastLight = LightTaskbar();
             _icon = new NotifyIcon { Visible = true, Text = "Claude: idle", Icon = IconFor("idle") };
             _icon.ContextMenuStrip = new ContextMenuStrip();
             _timer = new System.Windows.Forms.Timer { Interval = 400 }; // FR5
@@ -115,23 +131,88 @@ static class Program
             var live = ReadLive();
             var view = Model.Evaluate(live);
 
-            // Only touch the UI when something actually changed (idle-cheap).
-            string sig = view.IconState + "|" + view.Tooltip + "|" + string.Join(";", view.Rows);
+            ChimeOnDone(live); // FR6 completion sound
+
+            // If the taskbar theme flipped, cached icons are the wrong contrast — drop them.
+            bool light = LightTaskbar();
+            if (light != _lastLight) { _lastLight = light; foreach (var i in _icons.Values) i.Dispose(); _icons.Clear(); _lastSig = ""; }
+
+            // Tooltip carries the elapsed timer (FR3) — time-dependent, so set it every tick (cheap).
+            string tooltip = view.Tooltip;
+            if (_cfg.ShowTimer && (view.TopState == "thinking" || view.TopState == "tool") && view.TopStartedAt > 0)
+            {
+                string t = $" ({Model.Elapsed(view.TopStartedAt, DateTimeOffset.UtcNow.ToUnixTimeSeconds())})";
+                tooltip = (view.Tooltip + t) is { Length: <= 63 } s ? s : view.Tooltip;
+            }
+            _icon.Text = tooltip;
+
+            // Icon + menu are structural — rebuild only when state/rows change (idle-cheap).
+            var started = live.Where(s => s.Started).OrderByDescending(s => Model.Priority(s.State)).ToList();
+            string sig = view.IconState + "|" + string.Join(";", started.Select(s => s.SessionId + s.State));
             if (sig == _lastSig) return;
             _lastSig = sig;
 
             _icon.Icon = IconFor(view.IconState);
-            _icon.Text = view.Tooltip;
+            BuildMenu(started);
+        }
 
+        void BuildMenu(List<Session> started)
+        {
             var menu = _icon.ContextMenuStrip!;
             menu.Items.Clear();
-            if (view.Rows.Count == 0)
+            if (started.Count == 0)
                 menu.Items.Add(new ToolStripMenuItem("No active sessions") { Enabled = false });
             else
-                foreach (var row in view.Rows)
-                    menu.Items.Add(new ToolStripMenuItem(row) { Enabled = false }); // click-to-focus is M3
+                foreach (var s in started)
+                {
+                    int pid = s.Pid;
+                    menu.Items.Add(new ToolStripMenuItem(Model.RowLabel(s), null, (_, _) => FocusSession(pid))); // FR4
+                }
+
+            menu.Items.Add(new ToolStripSeparator());
+
+            // Settings (FR6) — checkable, persisted on toggle.
+            var timer = new ToolStripMenuItem("Show timer", null, (_, _) => { _cfg.ShowTimer = !_cfg.ShowTimer; SaveSettings(_cfg); }) { Checked = _cfg.ShowTimer };
+            var sound = new ToolStripMenuItem("Completion sound", null, (_, _) => { _cfg.CompletionSound = !_cfg.CompletionSound; SaveSettings(_cfg); }) { Checked = _cfg.CompletionSound };
+            var color = new ToolStripMenuItem("Icon color");
+            foreach (var mode in new[] { "Orange", "System" })
+            {
+                var m = mode;
+                color.DropDownItems.Add(new ToolStripMenuItem(m, null, (_, _) =>
+                {
+                    _cfg.IconColor = m; SaveSettings(_cfg);
+                    foreach (var i in _icons.Values) i.Dispose(); _icons.Clear(); _lastSig = ""; // re-tint
+                }) { Checked = _cfg.IconColor == m });
+            }
+            menu.Items.Add(timer);
+            menu.Items.Add(sound);
+            menu.Items.Add(color);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(new ToolStripMenuItem("Exit", null, (_, _) => { _icon.Visible = false; Application.Exit(); }));
+        }
+
+        // Fire the completion chime once per session as it transitions into `done`.
+        void ChimeOnDone(List<Session> live)
+        {
+            var ids = new HashSet<string>();
+            foreach (var s in live)
+            {
+                ids.Add(s.SessionId);
+                _lastState.TryGetValue(s.SessionId, out var prev);
+                if (s.State == "done" && prev != "done" && _cfg.CompletionSound)
+                    System.Media.SystemSounds.Asterisk.Play(); // ponytail: system chime now; bundled mp3 is M4
+                _lastState[s.SessionId] = s.State;
+            }
+            foreach (var gone in _lastState.Keys.Where(k => !ids.Contains(k)).ToList()) _lastState.Remove(gone);
+        }
+
+        Icon IconFor(string state)
+        {
+            string key = $"{state}|{_cfg.IconColor}|{_lastLight}";
+            if (_icons.TryGetValue(key, out var cached)) return cached;
+            var ico = MakeIcon(state, _cfg.IconColor, _lastLight);
+            _icons[key] = ico;
+            return ico;
         }
 
         List<Session> ReadLive()
@@ -166,14 +247,6 @@ static class Program
             return live;
         }
 
-        Icon IconFor(string state)
-        {
-            if (_icons.TryGetValue(state, out var cached)) return cached;
-            var ico = MakeIcon(state);
-            _icons[state] = ico;
-            return ico;
-        }
-
         public void Dispose()
         {
             _timer.Dispose();
@@ -183,16 +256,20 @@ static class Program
     }
 
     // Draw a 16px dot colored by state. permission gets an attention badge.
-    // ponytail: fixed colors that read on both light/dark taskbars; System-theme tint is M3.
-    static Icon MakeIcon(string state)
+    // Working states are always their brand color; the neutral idle dot follows the "Icon color"
+    // setting — "System" adapts to the taskbar theme for contrast, "Orange" stays a warm gray (FR6).
+    static Icon MakeIcon(string state, string iconColor, bool lightTaskbar)
     {
+        Color neutral = iconColor == "System"
+            ? (lightTaskbar ? Color.FromArgb(90, 90, 90) : Color.FromArgb(220, 220, 220))
+            : Color.SlateGray;
         Color c = state switch
         {
             "permission" => Color.Gold,
             "tool" => Color.DarkOrange,
             "thinking" => Color.Orange,
             "done" => Color.MediumSeaGreen,
-            _ => Color.SlateGray, // idle / unknown
+            _ => neutral, // idle / unknown
         };
         using var bmp = new Bitmap(16, 16);
         using (var g = Graphics.FromImage(bmp))
@@ -235,6 +312,87 @@ static class Program
         catch { /* autostart is best-effort */ }
     }
 
+    // ---- settings (FR6): %USERPROFILE%\.claude\statusbar\settings.json ----
+    static readonly string SettingsPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        ".claude", "statusbar", "settings.json");
+
+    static Settings LoadSettings()
+    {
+        try { return JsonSerializer.Deserialize<Settings>(File.ReadAllText(SettingsPath)) ?? new(); }
+        catch { return new(); } // missing/corrupt => defaults
+    }
+
+    static void SaveSettings(Settings s)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)!);
+            File.WriteAllText(SettingsPath, JsonSerializer.Serialize(s, new JsonSerializerOptions { WriteIndented = true }));
+        }
+        catch { /* best-effort */ }
+    }
+
+    // Light taskbar? Registry SystemUsesLightTheme (0=dark, 1=light). Default dark on any error.
+    static bool LightTaskbar()
+    {
+        try
+        {
+            using var k = Registry.CurrentUser.OpenSubKey(
+                @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+            return k?.GetValue("SystemUsesLightTheme") is int v && v != 0;
+        }
+        catch { return false; }
+    }
+
+    // ---- click-to-focus (FR4), best-effort ----
+    // A CLI session's `claude` pid owns no window — the terminal (an ancestor) does. Walk up the
+    // parent chain to the first process with a main window and bring it forward.
+    [StructLayout(LayoutKind.Sequential)]
+    struct ProcessBasicInformation
+    {
+        public IntPtr Reserved1, PebBaseAddress, Reserved2_0, Reserved2_1, UniqueProcessId, InheritedFromUniqueProcessId;
+    }
+
+    [DllImport("ntdll.dll")]
+    static extern int NtQueryInformationProcess(IntPtr h, int cls, ref ProcessBasicInformation pbi, int len, out int ret);
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
+    [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
+    const int SW_RESTORE = 9;
+
+    static int ParentPid(Process p)
+    {
+        try
+        {
+            var pbi = new ProcessBasicInformation();
+            if (NtQueryInformationProcess(p.Handle, 0, ref pbi, Marshal.SizeOf(pbi), out _) != 0) return 0;
+            return pbi.InheritedFromUniqueProcessId.ToInt32();
+        }
+        catch { return 0; }
+    }
+
+    static void FocusSession(int pid)
+    {
+        try
+        {
+            for (int i = 0; i < 8 && pid > 0; i++)
+            {
+                Process p;
+                try { p = Process.GetProcessById(pid); } catch { return; }
+                var h = p.MainWindowHandle;
+                if (h != IntPtr.Zero)
+                {
+                    if (IsIconic(h)) ShowWindow(h, SW_RESTORE);
+                    SetForegroundWindow(h);
+                    return;
+                }
+                pid = ParentPid(p);
+            }
+        }
+        catch { /* best-effort; some terminals expose no focusable window */ }
+    }
+
     // ---- self-check (no framework): dotnet run -- --selftest ----
     static int SelfTest()
     {
@@ -262,6 +420,18 @@ static class Program
 
         Check(Model.Evaluate(new List<Session>()).IconState == "idle", "no sessions => idle");
         Check(Model.Evaluate(new List<Session>()).Tooltip == "Claude: idle", "empty tooltip");
+
+        // FR3 elapsed timer formatting
+        Check(Model.Elapsed(now - 75, now) == "1m 15s", "elapsed formats mm ss");
+        Check(Model.Elapsed(now + 10, now) == "0m 0s", "negative elapsed clamps to zero");
+        Check(v.TopStartedAt == 0, "permission winner has startedAt 0 (no timer)");
+
+        // FR6 settings round-trip (defaults + persistence)
+        var def = new Settings();
+        Check(def.ShowTimer && !def.CompletionSound && def.IconColor == "Orange", "settings defaults");
+        var json = JsonSerializer.Serialize(new Settings { ShowTimer = false, IconColor = "System" });
+        var back = JsonSerializer.Deserialize<Settings>(json)!;
+        Check(!back.ShowTimer && back.IconColor == "System", "settings round-trip through json");
 
         Console.WriteLine("selftest OK");
         return 0;
