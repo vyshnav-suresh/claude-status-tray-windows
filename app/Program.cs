@@ -77,6 +77,9 @@ sealed class Settings
     public bool CompletionSound { get; set; } = false;       // FR6: off by default
     public string IconColor { get; set; } = "Orange";        // FR6: "Orange" | "System"
     public bool AutoUpdateCheck { get; set; } = false;       // opt-in network; manual check always available
+    public bool ShowPill { get; set; } = true;               // floating always-visible status label
+    public int PillX { get; set; } = -1;                     // saved pill position (-1 = default bottom-right)
+    public int PillY { get; set; } = -1;
 }
 
 static class Program
@@ -107,6 +110,60 @@ static class Program
         return 0;
     }
 
+    // Small always-on-top, non-activating status label near the tray — the always-visible text the
+    // notification area can't show inline. Draggable; hidden when no session is active.
+    sealed class PillForm : Form
+    {
+        string _text = "";
+        Color _dot = Color.Gray, _fore = Color.White;
+        bool _drag; Point _dragStart;
+        public Action<Point>? Moved;
+
+        public PillForm()
+        {
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            TopMost = true;
+            StartPosition = FormStartPosition.Manual;
+            DoubleBuffered = true;
+            Height = 26;
+            Font = new Font("Segoe UI", 9f);
+            MouseDown += (_, e) => { if (e.Button == MouseButtons.Left) { _drag = true; _dragStart = e.Location; } };
+            MouseMove += (_, e) => { if (_drag) Location = new Point(Location.X + e.X - _dragStart.X, Location.Y + e.Y - _dragStart.Y); };
+            MouseUp += (_, __) => { if (_drag) { _drag = false; Moved?.Invoke(Location); } };
+        }
+
+        // Show without stealing focus; keep out of alt-tab.
+        protected override bool ShowWithoutActivation => true;
+        protected override CreateParams CreateParams
+        {
+            get { var cp = base.CreateParams; cp.ExStyle |= 0x08000000 /*WS_EX_NOACTIVATE*/ | 0x00000080 /*WS_EX_TOOLWINDOW*/; return cp; }
+        }
+
+        public void SetStatus(string text, Color dot, bool light)
+        {
+            _text = text; _dot = dot;
+            _fore = light ? Color.FromArgb(20, 20, 20) : Color.White;
+            BackColor = light ? Color.FromArgb(238, 238, 238) : Color.FromArgb(32, 32, 32);
+            using (var g = CreateGraphics()) Width = (int)g.MeasureString(text, Font).Width + 34;
+            Invalidate();
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using var path = new GraphicsPath();
+            int d = 10, w = Width - 1, h = Height - 1;
+            path.AddArc(0, 0, d, d, 180, 90); path.AddArc(w - d, 0, d, d, 270, 90);
+            path.AddArc(w - d, h - d, d, d, 0, 90); path.AddArc(0, h - d, d, d, 90, 90);
+            path.CloseFigure();
+            using (var bg = new SolidBrush(BackColor)) g.FillPath(bg, path);
+            using (var dot = new SolidBrush(_dot)) g.FillEllipse(dot, 9, Height / 2 - 5, 10, 10);
+            using (var tb = new SolidBrush(_fore)) g.DrawString(_text, Font, tb, 23, (Height - Font.Height) / 2f);
+        }
+    }
+
     // ---- WinForms shell ----
     sealed class TrayApp : IDisposable
     {
@@ -116,6 +173,7 @@ static class Program
         readonly Dictionary<string, Icon> _icons = new();
         readonly Dictionary<string, string> _lastState = new(); // sid -> last state, for done chime
         readonly Settings _cfg = LoadSettings();
+        readonly PillForm _pill = new();
         string _lastSig = "";
         bool _lastLight;
         int _frame; // working-state animation (FR: low-fps, 4 frames)
@@ -124,6 +182,7 @@ static class Program
         public TrayApp()
         {
             _lastLight = LightTaskbar();
+            _pill.Moved += loc => { _cfg.PillX = loc.X; _cfg.PillY = loc.Y; SaveSettings(_cfg); };
             _icon = new NotifyIcon { Visible = true, Text = "Claude: idle", Icon = IconFor("idle") };
             _icon.ContextMenuStrip = new ContextMenuStrip();
             _timer = new System.Windows.Forms.Timer { Interval = 400 }; // FR5
@@ -161,8 +220,10 @@ static class Program
             _frame = working ? (_frame + 1) % AnimFrames : 0;
             _icon.Icon = IconFor(view.IconState, _frame);
 
-            // The menu is structural — rebuild only when the session set/states change (idle-cheap).
             var started = live.Where(s => s.Started).OrderByDescending(s => Model.Priority(s.State)).ToList();
+            UpdatePill(started.Count > 0 ? started[0] : null);
+
+            // The menu is structural — rebuild only when the session set/states change (idle-cheap).
             string sig = view.IconState + "|" + string.Join(";", started.Select(s => s.SessionId + s.State));
             if (sig == _lastSig) return;
             _lastSig = sig;
@@ -198,7 +259,9 @@ static class Program
                     foreach (var i in _icons.Values) i.Dispose(); _icons.Clear(); _lastSig = ""; // re-tint
                 }) { Checked = _cfg.IconColor == m });
             }
+            var pill = new ToolStripMenuItem("Show status label", null, (_, _) => { _cfg.ShowPill = !_cfg.ShowPill; SaveSettings(_cfg); if (!_cfg.ShowPill) _pill.Hide(); }) { Checked = _cfg.ShowPill };
             var autoUpd = new ToolStripMenuItem("Check for updates at startup", null, (_, _) => { _cfg.AutoUpdateCheck = !_cfg.AutoUpdateCheck; SaveSettings(_cfg); }) { Checked = _cfg.AutoUpdateCheck };
+            menu.Items.Add(pill);
             menu.Items.Add(timer);
             menu.Items.Add(sound);
             menu.Items.Add(color);
@@ -206,6 +269,28 @@ static class Program
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(new ToolStripMenuItem("Check for updates…", null, (_, _) => _ = CheckForUpdates(_icon, silent: false)));
             menu.Items.Add(new ToolStripMenuItem("Exit", null, (_, _) => { _icon.Visible = false; Application.Exit(); }));
+        }
+
+        // Refresh (or hide) the floating status pill from the top session.
+        void UpdatePill(Session? top)
+        {
+            if (!_cfg.ShowPill || top is null)
+            {
+                if (_pill.Visible) _pill.Hide();
+                return;
+            }
+            string label = string.IsNullOrEmpty(top.Label) ? top.State : top.Label;
+            string text = string.IsNullOrEmpty(top.Project) ? label : $"{label} · {top.Project}";
+            if (_cfg.ShowTimer && top.State is "thinking" or "tool" && top.StartedAt > 0)
+                text += " · " + Model.Elapsed(top.StartedAt, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+
+            _pill.SetStatus(text, StateColor(top.State, _cfg.IconColor, _lastLight), _lastLight);
+            if (!_pill.Visible)
+            {
+                if (_cfg.PillX >= 0) _pill.Location = new Point(_cfg.PillX, _cfg.PillY);
+                else { var wa = Screen.PrimaryScreen!.WorkingArea; _pill.Location = new Point(wa.Right - _pill.Width - 12, wa.Bottom - _pill.Height - 12); }
+                _pill.Show();
+            }
         }
 
         // Fire the completion chime once per session as it transitions into `done`.
@@ -300,6 +385,7 @@ static class Program
         {
             _timer.Dispose();
             _icon.Dispose();
+            _pill.Dispose();
             foreach (var i in _icons.Values) i.Dispose();
         }
     }
@@ -309,12 +395,13 @@ static class Program
     // Draw a 16px dot colored by state. permission gets an attention badge; working states (thinking/
     // tool) get a small satellite orbiting at `frame` of 4 positions — a cheap spinner. Working states
     // are always their brand color; the neutral idle dot follows the "Icon color" setting (FR6).
-    static Icon MakeIcon(string state, int frame, string iconColor, bool lightTaskbar)
+    // Shared by the tray icon and the floating pill so both agree on the state color.
+    static Color StateColor(string state, string iconColor, bool lightTaskbar)
     {
         Color neutral = iconColor == "System"
             ? (lightTaskbar ? Color.FromArgb(90, 90, 90) : Color.FromArgb(220, 220, 220))
             : Color.SlateGray;
-        Color c = state switch
+        return state switch
         {
             "permission" => Color.Gold,
             "tool" => Color.DarkOrange,
@@ -322,6 +409,11 @@ static class Program
             "done" => Color.MediumSeaGreen,
             _ => neutral, // idle / unknown
         };
+    }
+
+    static Icon MakeIcon(string state, int frame, string iconColor, bool lightTaskbar)
+    {
+        Color c = StateColor(state, iconColor, lightTaskbar);
         using var bmp = new Bitmap(16, 16);
         using (var g = Graphics.FromImage(bmp))
         {
