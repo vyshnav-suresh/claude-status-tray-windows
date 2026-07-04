@@ -19,6 +19,9 @@ sealed class Session
     [JsonPropertyName("started")] public bool Started { get; set; }
     [JsonPropertyName("startedAt")] public long StartedAt { get; set; }
     [JsonPropertyName("ts")] public long Ts { get; set; }
+
+    // Not from the file — stamped on read from which provider's state.d it came.
+    [JsonIgnore] public string Provider { get; set; } = "Claude";
 }
 
 // Pure rendering logic — no WinForms, no filesystem. Unit-testable (see --selftest).
@@ -34,12 +37,15 @@ static class Model
     };
 
     public sealed record View(string IconState, string Tooltip, List<string> Rows,
-        string TopState, long TopStartedAt);
+        string TopState, long TopStartedAt, string TopProvider);
 
     static string What(Session s) => string.IsNullOrEmpty(s.Label) ? s.State : s.Label;
 
+    // "C"/"A" origin tag from the provider name (falls back to "?" if somehow empty).
+    public static string Tag(string provider) => string.IsNullOrEmpty(provider) ? "?" : provider[..1].ToUpperInvariant();
+
     public static string RowLabel(Session s)
-        => $"{(string.IsNullOrEmpty(s.Project) ? "(unknown)" : s.Project)} — {What(s)}";
+        => $"[{Tag(s.Provider)}] {(string.IsNullOrEmpty(s.Project) ? "(unknown)" : s.Project)} — {What(s)}";
 
     // "Xm Ys" elapsed since a turn started (FR3). Pure/testable.
     public static string Elapsed(long startedAt, long now)
@@ -53,12 +59,13 @@ static class Model
     // The elapsed timer (time-dependent) is appended by the caller so this stays deterministic.
     public static View Evaluate(IReadOnlyList<Session> live)
     {
-        var top = live.OrderByDescending(s => Priority(s.State)).FirstOrDefault();
+        // Highest priority wins across providers; ties break to the most recently active session.
+        var top = live.OrderByDescending(s => Priority(s.State)).ThenByDescending(s => s.Ts).FirstOrDefault();
         string iconState = top?.State ?? "idle";
 
         string tooltip = top is null
             ? "Claude: idle"
-            : (string.IsNullOrEmpty(top.Project) ? $"Claude: {What(top)}" : $"{What(top)} — {top.Project}");
+            : (string.IsNullOrEmpty(top.Project) ? $"[{Tag(top.Provider)}] {What(top)}" : $"[{Tag(top.Provider)}] {What(top)} — {top.Project}");
         if (tooltip.Length > 63) tooltip = tooltip[..63]; // NotifyIcon.Text hard limit
 
         var rows = live
@@ -67,7 +74,7 @@ static class Model
             .Select(RowLabel)
             .ToList();
 
-        return new View(iconState, tooltip, rows, iconState, top?.StartedAt ?? 0);
+        return new View(iconState, tooltip, rows, iconState, top?.StartedAt ?? 0, top?.Provider ?? "Claude");
     }
 }
 
@@ -84,9 +91,15 @@ sealed class Settings
 
 static class Program
 {
-    static readonly string StateDir = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-        ".claude", "statusbar", "state.d");
+    // Each provider publishes to its own state.d; a missing dir is just a provider that isn't running.
+    static readonly (string Provider, string Dir)[] ProviderStateDirs =
+    {
+        ("Claude",      ProviderDir(".claude")),
+        ("Antigravity", ProviderDir(".antigravity")),
+    };
+
+    static string ProviderDir(string home) => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), home, "statusbar", "state.d");
 
     // Windows runs each hook through a transient cmd.exe, so the recorded ppid is almost always
     // dead by the time we poll — pid liveness alone would hide every session. File existence is the
@@ -183,7 +196,7 @@ static class Program
         {
             _lastLight = LightTaskbar();
             _pill.Moved += loc => { _cfg.PillX = loc.X; _cfg.PillY = loc.Y; SaveSettings(_cfg); };
-            _icon = new NotifyIcon { Visible = true, Text = "Claude: idle", Icon = IconFor("idle") };
+            _icon = new NotifyIcon { Visible = true, Text = "Claude: idle", Icon = IconFor("idle", "Claude") };
             _icon.ContextMenuStrip = new ContextMenuStrip();
             _timer = new System.Windows.Forms.Timer { Interval = 400 }; // FR5
             _timer.Tick += (_, _) => Poll();
@@ -218,7 +231,7 @@ static class Program
             // changed (400ms/frame ≈ 2.5fps — deliberately low, per the animation-cost risk).
             bool working = view.IconState is "thinking" or "tool";
             _frame = working ? (_frame + 1) % AnimFrames : 0;
-            _icon.Icon = IconFor(view.IconState, _frame);
+            _icon.Icon = IconFor(view.IconState, view.TopProvider, _frame);
 
             var started = live.Where(s => s.Started).OrderByDescending(s => Model.Priority(s.State)).ToList();
             UpdatePill(started.Count > 0 ? started[0] : null);
@@ -283,8 +296,9 @@ static class Program
             string text = string.IsNullOrEmpty(top.Project) ? label : $"{label} · {top.Project}";
             if (_cfg.ShowTimer && top.State is "thinking" or "tool" && top.StartedAt > 0)
                 text += " · " + Model.Elapsed(top.StartedAt, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+            text = $"[{Model.Tag(top.Provider)}] {text}";
 
-            _pill.SetStatus(text, StateColor(top.State, _cfg.IconColor, _lastLight), _lastLight);
+            _pill.SetStatus(text, StateColor(top.State, top.Provider, _cfg.IconColor, _lastLight), _lastLight);
             // Dragged? honor the saved spot. Otherwise dock to the taskbar, re-anchored each tick so
             // the right edge stays pinned by the clock as the label width changes.
             _pill.Location = _cfg.PillX >= 0
@@ -340,11 +354,11 @@ static class Program
             catch { return true; } // give up quietly
         }
 
-        Icon IconFor(string state, int frame = 0)
+        Icon IconFor(string state, string provider, int frame = 0)
         {
-            string key = $"{state}|{frame}|{_cfg.IconColor}|{_lastLight}";
+            string key = $"{state}|{provider}|{frame}|{_cfg.IconColor}|{_lastLight}";
             if (_icons.TryGetValue(key, out var cached)) return cached;
-            var ico = MakeIcon(state, frame, _cfg.IconColor, _lastLight);
+            var ico = MakeIcon(state, provider, frame, _cfg.IconColor, _lastLight);
             _icons[key] = ico;
             return ico;
         }
@@ -352,29 +366,32 @@ static class Program
         List<Session> ReadLive()
         {
             var live = new List<Session>();
-            if (!Directory.Exists(StateDir)) return live;
-
             var seen = new HashSet<string>();
             long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            foreach (var f in Directory.EnumerateFiles(StateDir, "*.json"))
+
+            foreach (var (provider, dir) in ProviderStateDirs)
             {
-                seen.Add(f);
-                Session? s;
-                try
+                if (!Directory.Exists(dir)) continue; // provider not running / never published
+                foreach (var f in Directory.EnumerateFiles(dir, "*.json"))
                 {
-                    var mtime = File.GetLastWriteTimeUtc(f);
-                    if (_cache.TryGetValue(f, out var hit) && hit.mtime == mtime)
-                        s = hit.data; // FR5: re-parse only changed files
-                    else
+                    seen.Add(f);
+                    Session? s;
+                    try
                     {
-                        s = JsonSerializer.Deserialize<Session>(File.ReadAllText(f));
-                        if (s is not null) _cache[f] = (mtime, s);
+                        var mtime = File.GetLastWriteTimeUtc(f);
+                        if (_cache.TryGetValue(f, out var hit) && hit.mtime == mtime)
+                            s = hit.data; // FR5: re-parse only changed files
+                        else
+                        {
+                            s = JsonSerializer.Deserialize<Session>(File.ReadAllText(f));
+                            if (s is not null) { s.Provider = provider; _cache[f] = (mtime, s); }
+                        }
                     }
+                    catch { continue; } // locked / partial write — skip this tick
+                    if (s is null) continue;
+                    if (!IsLive(Alive(s.Pid), s.Ts, now)) continue; // FR5
+                    live.Add(s);
                 }
-                catch { continue; } // locked / partial write — skip this tick
-                if (s is null) continue;
-                if (!IsLive(Alive(s.Pid), s.Ts, now)) continue; // FR5
-                live.Add(s);
             }
             foreach (var gone in _cache.Keys.Where(k => !seen.Contains(k)).ToList())
                 _cache.Remove(gone);
@@ -395,8 +412,14 @@ static class Program
     // Draw a 16px dot colored by state. permission gets an attention badge; working states (thinking/
     // tool) get a small satellite orbiting at `frame` of 4 positions — a cheap spinner. Working states
     // are always their brand color; the neutral idle dot follows the "Icon color" setting (FR6).
-    // Shared by the tray icon and the floating pill so both agree on the state color.
-    static Color StateColor(string state, string iconColor, bool lightTaskbar)
+    // Claude = orange, Antigravity = blue (Gemini aesthetic). Working states carry the provider hue
+    // so you can tell who's busy; permission/done stay universal (urgency/success read the same).
+    static Color BrandColor(string provider) => provider == "Antigravity"
+        ? Color.FromArgb(66, 133, 244)   // Google blue
+        : Color.DarkOrange;              // Claude
+
+    // Shared by the tray icon and the floating pill so both agree on the color.
+    static Color StateColor(string state, string provider, string iconColor, bool lightTaskbar)
     {
         Color neutral = iconColor == "System"
             ? (lightTaskbar ? Color.FromArgb(90, 90, 90) : Color.FromArgb(220, 220, 220))
@@ -404,8 +427,7 @@ static class Program
         return state switch
         {
             "permission" => Color.Gold,
-            "tool" => Color.DarkOrange,
-            "thinking" => Color.Orange,
+            "thinking" or "tool" => BrandColor(provider),
             "done" => Color.MediumSeaGreen,
             _ => neutral, // idle / unknown
         };
@@ -424,9 +446,9 @@ static class Program
         }
     }
 
-    static Icon MakeIcon(string state, int frame, string iconColor, bool lightTaskbar)
+    static Icon MakeIcon(string state, string provider, int frame, string iconColor, bool lightTaskbar)
     {
-        Color c = StateColor(state, iconColor, lightTaskbar);
+        Color c = StateColor(state, provider, iconColor, lightTaskbar);
         using var bmp = new Bitmap(16, 16);
         using (var g = Graphics.FromImage(bmp))
         {
@@ -688,15 +710,27 @@ static class Program
         Check(IsLive(pidAlive: true, ts: now - StaleSeconds - 1, now: now), "alive pid => live even if stale (macOS path)");
         var sessions = new List<Session>
         {
-            new() { State = "thinking", Project = "alpha", Started = true, Pid = self, Ts = now, Label = "Thinking…" },
-            new() { State = "permission", Project = "beta", Started = true, Pid = self, Ts = now, Label = "Awaiting permission" },
-            new() { State = "idle", Project = "gamma", Started = false, Pid = self, Ts = now },
+            new() { State = "thinking", Project = "alpha", Started = true, Pid = self, Ts = now, Label = "Thinking…", Provider = "Claude" },
+            new() { State = "permission", Project = "beta", Started = true, Pid = self, Ts = now, Label = "Awaiting permission", Provider = "Claude" },
+            new() { State = "idle", Project = "gamma", Started = false, Pid = self, Ts = now, Provider = "Claude" },
         };
         var v = Model.Evaluate(sessions);
         Check(v.IconState == "permission", "permission must win priority");
         Check(v.Tooltip.Contains("beta"), "tooltip should name the winning project");
         Check(v.Rows.Count == 2, "only started sessions listed (idle/unstarted excluded)");
         Check(v.Rows[0].Contains("beta"), "rows sorted by priority, permission first");
+
+        // Multi-provider: aggregate across providers, cross-provider priority, and [C]/[A] tags.
+        var multi = new List<Session>
+        {
+            new() { State = "thinking", Project = "current-cloud", Started = true, Pid = self, Ts = now, Provider = "Claude" },
+            new() { State = "permission", Project = "notification-ide-ai", Started = true, Pid = self, Ts = now, Provider = "Antigravity" },
+        };
+        var mv = Model.Evaluate(multi);
+        Check(mv.IconState == "permission" && mv.TopProvider == "Antigravity", "Antigravity permission overrides Claude thinking");
+        Check(mv.Rows.Exists(r => r.StartsWith("[A]")) && mv.Rows.Exists(r => r.StartsWith("[C]")), "rows carry [A]/[C] origin tags");
+        Check(mv.Tooltip.StartsWith("[A]"), "tooltip tags the winning provider");
+        Check(Model.Tag("Antigravity") == "A" && Model.Tag("Claude") == "C", "provider tag is first letter, uppercased");
 
         Check(Model.Evaluate(new List<Session>()).IconState == "idle", "no sessions => idle");
         Check(Model.Evaluate(new List<Session>()).Tooltip == "Claude: idle", "empty tooltip");
@@ -718,7 +752,7 @@ static class Program
         Check(ParseVer("not-a-tag") is null, "garbage tag => null (no crash)");
         Check(new Version(1, 0, 1) > new Version(1, 0, 0), "newer version compares greater");
         Check(AnimFrames >= 2 && AnimFrames <= 4, "animation frame count kept low");
-        using (var i = MakeIcon("thinking", 2, "Orange", false)) Check(i.Width > 0, "animated icon frame renders");
+        using (var i = MakeIcon("thinking", "Antigravity", 2, "Orange", false)) Check(i.Width > 0, "animated icon frame renders");
         var wav = typeof(Chime).GetField("Wav", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetValue(null) as byte[];
         Check(wav is not null && wav.Length > 44 && wav[0] == (byte)'R' && wav[8] == (byte)'W', "chime is a non-empty RIFF/WAVE buffer");
 
