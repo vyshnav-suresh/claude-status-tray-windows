@@ -85,9 +85,12 @@ static class Program
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
         ".claude", "statusbar", "state.d");
 
-    // pid liveness is the real check; ts is a backstop for a crashed session whose pid got
-    // recycled onto an unrelated process. Idle files aren't rewritten, so keep it generous.
-    const long StaleSeconds = 24 * 3600;
+    // Windows runs each hook through a transient cmd.exe, so the recorded ppid is almost always
+    // dead by the time we poll — pid liveness alone would hide every session. File existence is the
+    // true liveness signal (SessionEnd deletes the file on close); pid-alive and a recent ts are just
+    // crash backstops. A session is dropped only when BOTH are gone. Window covers a person who steps
+    // away from a permission prompt; a real crash orphan lingers this long, then rests.
+    const long StaleSeconds = 4 * 3600;
 
     [DllImport("user32.dll", SetLastError = true)]
     static extern bool DestroyIcon(IntPtr handle);
@@ -285,7 +288,7 @@ static class Program
                 }
                 catch { continue; } // locked / partial write — skip this tick
                 if (s is null) continue;
-                if (!Alive(s.Pid) || now - s.Ts > StaleSeconds) continue; // FR5: drop dead/stale
+                if (!IsLive(Alive(s.Pid), s.Ts, now)) continue; // FR5
                 live.Add(s);
             }
             foreach (var gone in _cache.Keys.Where(k => !seen.Contains(k)).ToList())
@@ -346,6 +349,10 @@ static class Program
         try { return (Icon)Icon.FromHandle(h).Clone(); } // Clone -> owns its own copy
         finally { DestroyIcon(h); }
     }
+
+    // Keep a session unless BOTH signals say gone: pid dead AND file stale. (Windows ppid is usually
+    // a dead transient shell, so ts freshness carries liveness there.)
+    public static bool IsLive(bool pidAlive, long ts, long now) => pidAlive || now - ts <= StaleSeconds;
 
     static bool Alive(int pid)
     {
@@ -552,6 +559,11 @@ static class Program
         Check(!Alive(0), "pid 0 should be dead");
 
         long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+        // Windows liveness: dead pid but fresh file stays; dead + stale drops; alive always stays.
+        Check(IsLive(pidAlive: false, ts: now, now: now), "dead pid + fresh file => live (Windows path)");
+        Check(!IsLive(pidAlive: false, ts: now - StaleSeconds - 1, now: now), "dead pid + stale file => dropped");
+        Check(IsLive(pidAlive: true, ts: now - StaleSeconds - 1, now: now), "alive pid => live even if stale (macOS path)");
         var sessions = new List<Session>
         {
             new() { State = "thinking", Project = "alpha", Started = true, Pid = self, Ts = now, Label = "Thinking…" },
