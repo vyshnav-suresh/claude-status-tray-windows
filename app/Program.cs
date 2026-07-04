@@ -575,9 +575,17 @@ static class Program
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
         ".claude", "statusbar", "settings.json");
 
+    // Tolerant of hand-edits: case-insensitive keys and string-or-number values, so a stray
+    // "PillX": "-1" doesn't throw and reset every setting to default.
+    static readonly JsonSerializerOptions SettingsJson = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowReadingFromString,
+    };
+
     static Settings LoadSettings()
     {
-        try { return JsonSerializer.Deserialize<Settings>(File.ReadAllText(SettingsPath)) ?? new(); }
+        try { return JsonSerializer.Deserialize<Settings>(File.ReadAllText(SettingsPath), SettingsJson) ?? new(); }
         catch { return new(); } // missing/corrupt => defaults
     }
 
