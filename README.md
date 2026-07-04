@@ -48,6 +48,11 @@ Use this unless you want to modify the code. No .NET SDK required.
 2. Unzip it.
 3. In the unzipped folder, run `.\install.ps1`.
 
+> **If PowerShell blocks the script** (`... is not digitally signed` / execution policy), run it once with a bypass — this doesn't change any system setting:
+> ```powershell
+> powershell -ExecutionPolicy Bypass -File .\install.ps1
+> ```
+
 The zip bundles the prebuilt exe, so its `install.ps1` just copies the exe to `%LOCALAPPDATA%\ClaudeStatusTray\`, wires the Claude Code hooks into `%USERPROFILE%\.claude\settings.json` (merging, never clobbering, with a one-time backup), registers autostart, and launches it. The only requirement is Node.js.
 
 The tray dot appears near the clock and reacts the moment you start or continue a Claude Code session.
