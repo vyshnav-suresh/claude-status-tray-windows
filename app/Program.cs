@@ -82,7 +82,7 @@ static class Model
 sealed class Settings
 {
     public bool ShowTimer { get; set; } = true;              // FR6
-    public bool CompletionSound { get; set; } = false;       // FR6: off by default
+    public bool CompletionSound { get; set; } = true;        // event sounds on by default
     public string IconColor { get; set; } = "Orange";        // FR6: "Orange" | "System"
     public bool AutoUpdateCheck { get; set; } = false;       // opt-in network; manual check always available
     public bool ShowPill { get; set; } = true;               // floating always-visible status label
@@ -880,7 +880,7 @@ static class Program
 
         // FR6 settings round-trip (defaults + persistence)
         var def = new Settings();
-        Check(def.ShowTimer && !def.CompletionSound && def.IconColor == "Orange", "settings defaults");
+        Check(def.ShowTimer && def.CompletionSound && def.IconColor == "Orange", "settings defaults");
         var json = JsonSerializer.Serialize(new Settings { ShowTimer = false, IconColor = "System" });
         var back = JsonSerializer.Deserialize<Settings>(json)!;
         Check(!back.ShowTimer && back.IconColor == "System", "settings round-trip through json");
