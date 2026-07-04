@@ -87,6 +87,7 @@ sealed class Settings
     public bool ShowPill { get; set; } = true;               // floating always-visible status label
     public int PillX { get; set; } = -1;                     // saved pill position (-1 = default bottom-right)
     public int PillY { get; set; } = -1;
+    public bool Notifications { get; set; } = true;          // desktop balloon toasts per event
 }
 
 static class Program
@@ -191,12 +192,14 @@ static class Program
         bool _lastLight;
         int _frame; // working-state animation (FR: low-fps, 4 frames)
         bool _promoted; // taskbar auto-promotion done for this run
+        Action? _balloonClick; // one-shot action for the next balloon click
 
         public TrayApp()
         {
             _lastLight = LightTaskbar();
             _pill.Moved += loc => { _cfg.PillX = loc.X; _cfg.PillY = loc.Y; SaveSettings(_cfg); };
             _icon = new NotifyIcon { Visible = true, Text = "Claude: idle", Icon = IconFor("idle", "Claude") };
+            _icon.BalloonTipClicked += (_, _) => { var a = _balloonClick; _balloonClick = null; a?.Invoke(); };
             _icon.ContextMenuStrip = new ContextMenuStrip();
             _timer = new System.Windows.Forms.Timer { Interval = 400 }; // FR5
             _timer.Tick += (_, _) => Poll();
@@ -212,7 +215,7 @@ static class Program
             var live = ReadLive();
             var view = Model.Evaluate(live);
 
-            ChimeOnDone(live); // FR6 completion sound
+            NotifyEvents(live); // per-event desktop notifications + sound
 
             // If the taskbar theme flipped, cached icons are the wrong contrast — drop them.
             bool light = LightTaskbar();
@@ -261,7 +264,8 @@ static class Program
 
             // Settings (FR6) — checkable, persisted on toggle.
             var timer = new ToolStripMenuItem("Show timer", null, (_, _) => { _cfg.ShowTimer = !_cfg.ShowTimer; SaveSettings(_cfg); }) { Checked = _cfg.ShowTimer };
-            var sound = new ToolStripMenuItem("Completion sound", null, (_, _) => { _cfg.CompletionSound = !_cfg.CompletionSound; SaveSettings(_cfg); }) { Checked = _cfg.CompletionSound };
+            var notify = new ToolStripMenuItem("Notifications", null, (_, _) => { _cfg.Notifications = !_cfg.Notifications; SaveSettings(_cfg); }) { Checked = _cfg.Notifications };
+            var sound = new ToolStripMenuItem("Sound", null, (_, _) => { _cfg.CompletionSound = !_cfg.CompletionSound; SaveSettings(_cfg); }) { Checked = _cfg.CompletionSound };
             var color = new ToolStripMenuItem("Icon color");
             foreach (var mode in new[] { "Orange", "System" })
             {
@@ -276,6 +280,7 @@ static class Program
             var autoUpd = new ToolStripMenuItem("Check for updates at startup", null, (_, _) => { _cfg.AutoUpdateCheck = !_cfg.AutoUpdateCheck; SaveSettings(_cfg); }) { Checked = _cfg.AutoUpdateCheck };
             menu.Items.Add(pill);
             menu.Items.Add(timer);
+            menu.Items.Add(notify);
             menu.Items.Add(sound);
             menu.Items.Add(color);
             menu.Items.Add(autoUpd);
@@ -307,19 +312,39 @@ static class Program
             if (!_pill.Visible) _pill.Show();
         }
 
-        // Fire the completion chime once per session as it transitions into `done`.
-        void ChimeOnDone(List<Session> live)
+        // On each session's transition into permission/done, fire a distinct desktop notification
+        // (balloon + sound). Suppressed on the first poll so a restart mid-session isn't a toast storm.
+        void NotifyEvents(List<Session> live)
         {
             var ids = new HashSet<string>();
             foreach (var s in live)
             {
                 ids.Add(s.SessionId);
                 _lastState.TryGetValue(s.SessionId, out var prev);
-                if (s.State == "done" && prev != "done" && _cfg.CompletionSound)
-                    Chime.Play();
+                bool known = prev is not null;
+                if (known && s.State != prev)
+                {
+                    string who = string.IsNullOrEmpty(s.Project) ? s.SessionId : s.Project;
+                    string tagged = $"[{Model.Tag(s.Provider)}] {who}";
+                    if (s.State == "permission")
+                        Notify("Permission needed", $"{tagged} is awaiting your approval", ToolTipIcon.Warning, Chime.Kind.Permission, s.Pid);
+                    else if (s.State == "done")
+                        Notify("Turn complete", $"{tagged} finished", ToolTipIcon.Info, Chime.Kind.Completion, s.Pid);
+                }
                 _lastState[s.SessionId] = s.State;
             }
             foreach (var gone in _lastState.Keys.Where(k => !ids.Contains(k)).ToList()) _lastState.Remove(gone);
+        }
+
+        void Notify(string title, string text, ToolTipIcon icon, Chime.Kind sound, int pid)
+        {
+            if (_cfg.CompletionSound) Chime.Play(sound);
+            if (!_cfg.Notifications) return;
+            _balloonClick = () => FocusSession(pid); // click the toast -> focus that session
+            _icon.BalloonTipTitle = title;
+            _icon.BalloonTipText = text;
+            _icon.BalloonTipIcon = icon;
+            _icon.ShowBalloonTip(5000);
         }
 
         // Windows 11 hides new tray icons in the overflow with no API to force-show them. But dragging
@@ -602,22 +627,26 @@ static class Program
         catch { /* best-effort; some terminals expose no focusable window */ }
     }
 
-    // ---- completion chime (FR / M4): synthesized two-note WAV, no bundled asset, no license question ----
+    // ---- event chimes: synthesized WAVs, no bundled asset, no license question. Distinct per event. ----
     static class Chime
     {
-        static readonly byte[] Wav = Build();
+        public enum Kind { Completion, Permission }
 
-        public static void Play()
+        // Completion: two rising notes (a satisfied "ding-dong"). Permission: a two-pulse higher beep
+        // (an attention "beep-beep") so the ear can tell them apart without looking.
+        static readonly byte[] Completion = Build(new[] { 880.0, 1174.66 });
+        static readonly byte[] Permission = Build(new[] { 1046.5, 1046.5 });
+
+        public static void Play(Kind kind)
         {
-            try { using var ms = new MemoryStream(Wav); new System.Media.SoundPlayer(ms).Play(); }
+            try { using var ms = new MemoryStream(kind == Kind.Permission ? Permission : Completion); new System.Media.SoundPlayer(ms).Play(); }
             catch { try { System.Media.SystemSounds.Asterisk.Play(); } catch { } } // fallback
         }
 
-        // 16-bit mono 44.1kHz, two rising notes (A5 -> D6) with a short fade so it doesn't click.
-        static byte[] Build()
+        // 16-bit mono 44.1kHz; each note gets a short fade so it doesn't click.
+        static byte[] Build(double[] notes)
         {
             const int rate = 44100;
-            double[] notes = { 880.0, 1174.66 };
             int per = rate / 6; // ~0.16s per note
             int n = per * notes.Length;
 
@@ -753,8 +782,11 @@ static class Program
         Check(new Version(1, 0, 1) > new Version(1, 0, 0), "newer version compares greater");
         Check(AnimFrames >= 2 && AnimFrames <= 4, "animation frame count kept low");
         using (var i = MakeIcon("thinking", "Antigravity", 2, "Orange", false)) Check(i.Width > 0, "animated icon frame renders");
-        var wav = typeof(Chime).GetField("Wav", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetValue(null) as byte[];
-        Check(wav is not null && wav.Length > 44 && wav[0] == (byte)'R' && wav[8] == (byte)'W', "chime is a non-empty RIFF/WAVE buffer");
+        foreach (var fld in new[] { "Completion", "Permission" })
+        {
+            var wav = typeof(Chime).GetField(fld, System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetValue(null) as byte[];
+            Check(wav is not null && wav.Length > 44 && wav[0] == (byte)'R' && wav[8] == (byte)'W', $"{fld} chime is a non-empty RIFF/WAVE buffer");
+        }
 
         Console.WriteLine("selftest OK");
         return 0;
