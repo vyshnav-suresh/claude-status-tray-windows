@@ -782,8 +782,7 @@ static class Program
     }
 
     // ---- update check (optional; GitHub releases) ----
-    // Set to the published repo once it exists; the check is a no-op / error balloon until then.
-    const string Repo = "m1ckc3s/claude-status-bar";
+    const string Repo = "vyshnav-suresh/claude-status-tray-windows";
 
     static async Task CheckForUpdates(NotifyIcon icon, bool silent)
     {
