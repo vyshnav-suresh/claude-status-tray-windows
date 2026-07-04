@@ -2,7 +2,9 @@
 
 A lightweight Windows system-tray indicator for AI coding agents. It shows — at a glance, on your taskbar — what Claude Code (and Antigravity) is doing right now: thinking, running a tool, awaiting your permission, or done, plus the elapsed time of the current turn and desktop notifications for the moments that matter.
 
+![ClaudeStatusTray — tray icon states and taskbar pills](assets/image.png)
 ![ClaudeStatusTray — tray icon states and taskbar pills](assets/preview.png)
+
 
 It's a Windows port of the macOS [m1ckc3s/claude-status-bar](https://github.com/m1ckc3s/claude-status-bar). The Swift menu-bar UI was rewritten from scratch as a native C#/.NET tray app; the reusable asset — the Claude Code hooks that publish per-session state — was ported to Windows.
 
