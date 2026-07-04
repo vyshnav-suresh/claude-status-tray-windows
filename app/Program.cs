@@ -73,9 +73,10 @@ static class Model
 
 sealed class Settings
 {
-    public bool ShowTimer { get; set; } = true;         // FR6
-    public bool CompletionSound { get; set; } = false;  // FR6: off by default
-    public string IconColor { get; set; } = "Orange";   // FR6: "Orange" | "System"
+    public bool ShowTimer { get; set; } = true;              // FR6
+    public bool CompletionSound { get; set; } = false;       // FR6: off by default
+    public string IconColor { get; set; } = "Orange";        // FR6: "Orange" | "System"
+    public bool AutoUpdateCheck { get; set; } = false;       // opt-in network; manual check always available
 }
 
 static class Program
@@ -114,6 +115,7 @@ static class Program
         readonly Settings _cfg = LoadSettings();
         string _lastSig = "";
         bool _lastLight;
+        int _frame; // working-state animation (FR: low-fps, 4 frames)
 
         public TrayApp()
         {
@@ -124,6 +126,7 @@ static class Program
             _timer.Tick += (_, _) => Poll();
             _timer.Start();
             Poll();
+            if (_cfg.AutoUpdateCheck) _ = CheckForUpdates(_icon, silent: true);
         }
 
         void Poll()
@@ -146,13 +149,18 @@ static class Program
             }
             _icon.Text = tooltip;
 
-            // Icon + menu are structural — rebuild only when state/rows change (idle-cheap).
+            // Icon swaps every tick while working so the animation runs even when nothing else
+            // changed (400ms/frame ≈ 2.5fps — deliberately low, per the animation-cost risk).
+            bool working = view.IconState is "thinking" or "tool";
+            _frame = working ? (_frame + 1) % AnimFrames : 0;
+            _icon.Icon = IconFor(view.IconState, _frame);
+
+            // The menu is structural — rebuild only when the session set/states change (idle-cheap).
             var started = live.Where(s => s.Started).OrderByDescending(s => Model.Priority(s.State)).ToList();
             string sig = view.IconState + "|" + string.Join(";", started.Select(s => s.SessionId + s.State));
             if (sig == _lastSig) return;
             _lastSig = sig;
 
-            _icon.Icon = IconFor(view.IconState);
             BuildMenu(started);
         }
 
@@ -184,10 +192,13 @@ static class Program
                     foreach (var i in _icons.Values) i.Dispose(); _icons.Clear(); _lastSig = ""; // re-tint
                 }) { Checked = _cfg.IconColor == m });
             }
+            var autoUpd = new ToolStripMenuItem("Check for updates at startup", null, (_, _) => { _cfg.AutoUpdateCheck = !_cfg.AutoUpdateCheck; SaveSettings(_cfg); }) { Checked = _cfg.AutoUpdateCheck };
             menu.Items.Add(timer);
             menu.Items.Add(sound);
             menu.Items.Add(color);
+            menu.Items.Add(autoUpd);
             menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(new ToolStripMenuItem("Check for updates…", null, (_, _) => _ = CheckForUpdates(_icon, silent: false)));
             menu.Items.Add(new ToolStripMenuItem("Exit", null, (_, _) => { _icon.Visible = false; Application.Exit(); }));
         }
 
@@ -200,17 +211,17 @@ static class Program
                 ids.Add(s.SessionId);
                 _lastState.TryGetValue(s.SessionId, out var prev);
                 if (s.State == "done" && prev != "done" && _cfg.CompletionSound)
-                    System.Media.SystemSounds.Asterisk.Play(); // ponytail: system chime now; bundled mp3 is M4
+                    Chime.Play();
                 _lastState[s.SessionId] = s.State;
             }
             foreach (var gone in _lastState.Keys.Where(k => !ids.Contains(k)).ToList()) _lastState.Remove(gone);
         }
 
-        Icon IconFor(string state)
+        Icon IconFor(string state, int frame = 0)
         {
-            string key = $"{state}|{_cfg.IconColor}|{_lastLight}";
+            string key = $"{state}|{frame}|{_cfg.IconColor}|{_lastLight}";
             if (_icons.TryGetValue(key, out var cached)) return cached;
-            var ico = MakeIcon(state, _cfg.IconColor, _lastLight);
+            var ico = MakeIcon(state, frame, _cfg.IconColor, _lastLight);
             _icons[key] = ico;
             return ico;
         }
@@ -255,10 +266,12 @@ static class Program
         }
     }
 
-    // Draw a 16px dot colored by state. permission gets an attention badge.
-    // Working states are always their brand color; the neutral idle dot follows the "Icon color"
-    // setting — "System" adapts to the taskbar theme for contrast, "Orange" stays a warm gray (FR6).
-    static Icon MakeIcon(string state, string iconColor, bool lightTaskbar)
+    const int AnimFrames = 4; // low frame count on purpose (tray-icon swap is costly on Windows)
+
+    // Draw a 16px dot colored by state. permission gets an attention badge; working states (thinking/
+    // tool) get a small satellite orbiting at `frame` of 4 positions — a cheap spinner. Working states
+    // are always their brand color; the neutral idle dot follows the "Icon color" setting (FR6).
+    static Icon MakeIcon(string state, int frame, string iconColor, bool lightTaskbar)
     {
         Color neutral = iconColor == "System"
             ? (lightTaskbar ? Color.FromArgb(90, 90, 90) : Color.FromArgb(220, 220, 220))
@@ -277,8 +290,18 @@ static class Program
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.Clear(Color.Transparent);
             using var b = new SolidBrush(c);
-            g.FillEllipse(b, 2, 2, 12, 12);
-            if (state == "permission")
+            g.FillEllipse(b, 3, 3, 10, 10);
+            if (state is "thinking" or "tool")
+            {
+                // Satellite at N/E/S/W by frame — reads as motion across ticks.
+                (int dx, int dy) = (frame % AnimFrames) switch
+                {
+                    0 => (5, 0), 1 => (10, 5), 2 => (5, 10), _ => (0, 5),
+                };
+                using var sat = new SolidBrush(Color.White);
+                g.FillEllipse(sat, dx, dy, 6, 6);
+            }
+            else if (state == "permission")
             {
                 using var badge = new SolidBrush(Color.OrangeRed);
                 g.FillEllipse(badge, 9, 0, 7, 7);
@@ -393,6 +416,94 @@ static class Program
         catch { /* best-effort; some terminals expose no focusable window */ }
     }
 
+    // ---- completion chime (FR / M4): synthesized two-note WAV, no bundled asset, no license question ----
+    static class Chime
+    {
+        static readonly byte[] Wav = Build();
+
+        public static void Play()
+        {
+            try { using var ms = new MemoryStream(Wav); new System.Media.SoundPlayer(ms).Play(); }
+            catch { try { System.Media.SystemSounds.Asterisk.Play(); } catch { } } // fallback
+        }
+
+        // 16-bit mono 44.1kHz, two rising notes (A5 -> D6) with a short fade so it doesn't click.
+        static byte[] Build()
+        {
+            const int rate = 44100;
+            double[] notes = { 880.0, 1174.66 };
+            int per = rate / 6; // ~0.16s per note
+            int n = per * notes.Length;
+
+            using var ms = new MemoryStream();
+            using var w = new BinaryWriter(ms);
+            void Chunk(string id) => w.Write(System.Text.Encoding.ASCII.GetBytes(id));
+            int dataBytes = n * 2;
+            Chunk("RIFF"); w.Write(36 + dataBytes); Chunk("WAVE");
+            Chunk("fmt "); w.Write(16); w.Write((short)1); w.Write((short)1);
+            w.Write(rate); w.Write(rate * 2); w.Write((short)2); w.Write((short)16);
+            Chunk("data"); w.Write(dataBytes);
+
+            for (int note = 0; note < notes.Length; note++)
+                for (int i = 0; i < per; i++)
+                {
+                    double t = i / (double)rate;
+                    double env = Math.Min(1.0, i / (rate * 0.01)) * Math.Min(1.0, (per - i) / (rate * 0.04));
+                    double v = Math.Sin(2 * Math.PI * notes[note] * t) * env * 0.3;
+                    w.Write((short)(v * short.MaxValue));
+                }
+            w.Flush();
+            return ms.ToArray();
+        }
+    }
+
+    // ---- update check (optional; GitHub releases) ----
+    // Set to the published repo once it exists; the check is a no-op / error balloon until then.
+    const string Repo = "m1ckc3s/claude-status-bar";
+
+    static async Task CheckForUpdates(NotifyIcon icon, bool silent)
+    {
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
+            http.DefaultRequestHeaders.UserAgent.ParseAdd("ClaudeStatusTray");
+            var json = await http.GetStringAsync($"https://api.github.com/repos/{Repo}/releases/latest");
+            using var doc = JsonDocument.Parse(json);
+            string tag = doc.RootElement.GetProperty("tag_name").GetString() ?? "";
+            var latest = ParseVer(tag);
+            var current = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version ?? new Version(0, 0);
+
+            if (latest is not null && latest > current)
+            {
+                string url = doc.RootElement.GetProperty("html_url").GetString() ?? $"https://github.com/{Repo}/releases";
+                icon.BalloonTipTitle = "Update available";
+                icon.BalloonTipText = $"{tag} is available (you have {current}). Click to open.";
+                void Open(object? _, EventArgs __) { try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); } catch { } icon.BalloonTipClicked -= Open; }
+                icon.BalloonTipClicked += Open;
+                icon.ShowBalloonTip(6000);
+            }
+            else if (!silent)
+            {
+                icon.BalloonTipTitle = "Up to date";
+                icon.BalloonTipText = $"You're on the latest version ({current}).";
+                icon.ShowBalloonTip(4000);
+            }
+        }
+        catch when (silent) { /* startup check stays quiet on failure */ }
+        catch
+        {
+            icon.BalloonTipTitle = "Update check failed";
+            icon.BalloonTipText = "Couldn't reach GitHub.";
+            icon.ShowBalloonTip(4000);
+        }
+    }
+
+    static Version? ParseVer(string tag)
+    {
+        var t = tag.TrimStart('v', 'V');
+        return Version.TryParse(t, out var v) ? v : null;
+    }
+
     // ---- self-check (no framework): dotnet run -- --selftest ----
     static int SelfTest()
     {
@@ -432,6 +543,15 @@ static class Program
         var json = JsonSerializer.Serialize(new Settings { ShowTimer = false, IconColor = "System" });
         var back = JsonSerializer.Deserialize<Settings>(json)!;
         Check(!back.ShowTimer && back.IconColor == "System", "settings round-trip through json");
+
+        // M4: update version comparison + icon frames + chime WAV is well-formed
+        Check(ParseVer("v1.2.3") == new Version(1, 2, 3), "tag 'v1.2.3' parses");
+        Check(ParseVer("not-a-tag") is null, "garbage tag => null (no crash)");
+        Check(new Version(1, 0, 1) > new Version(1, 0, 0), "newer version compares greater");
+        Check(AnimFrames >= 2 && AnimFrames <= 4, "animation frame count kept low");
+        using (var i = MakeIcon("thinking", 2, "Orange", false)) Check(i.Width > 0, "animated icon frame renders");
+        var wav = typeof(Chime).GetField("Wav", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetValue(null) as byte[];
+        Check(wav is not null && wav.Length > 44 && wav[0] == (byte)'R' && wav[8] == (byte)'W', "chime is a non-empty RIFF/WAVE buffer");
 
         Console.WriteLine("selftest OK");
         return 0;
