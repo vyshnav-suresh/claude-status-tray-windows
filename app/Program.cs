@@ -19,6 +19,7 @@ sealed class Session
     [JsonPropertyName("started")] public bool Started { get; set; }
     [JsonPropertyName("startedAt")] public long StartedAt { get; set; }
     [JsonPropertyName("ts")] public long Ts { get; set; }
+    [JsonPropertyName("transcript")] public string Transcript { get; set; } = "";
 
     // Not from the file — stamped on read from which provider's state.d it came.
     [JsonIgnore] public string Provider { get; set; } = "Claude";
@@ -193,6 +194,7 @@ static class Program
         int _frame; // working-state animation (FR: low-fps, 4 frames)
         bool _promoted; // taskbar auto-promotion done for this run
         Action? _balloonClick; // one-shot action for the next balloon click
+        int _rateTick; string? _resetText; bool _resetNotified; // session-limit reset tracking
 
         public TrayApp()
         {
@@ -217,30 +219,55 @@ static class Program
 
             NotifyEvents(live); // per-event desktop notifications + sound
 
+            var started = live.Where(s => s.Started).OrderByDescending(s => Model.Priority(s.State)).ToList();
+            var top = started.Count > 0 ? started[0] : null;
+
+            // Session-limit reset time comes from reading the active transcript's tail — throttle to
+            // ~8s so we're not opening files at 2.5fps. When blocked, this overrides icon/pill/tooltip.
+            if (_rateTick++ % 20 == 0)
+            {
+                var recent = live.OrderByDescending(s => s.Ts).FirstOrDefault();
+                _resetText = DetectResetTime(recent?.Transcript);
+                if (_resetText is null) _resetNotified = false;
+            }
+            bool blocked = _resetText is not null;
+
             // If the taskbar theme flipped, cached icons are the wrong contrast — drop them.
             bool light = LightTaskbar();
             if (light != _lastLight) { _lastLight = light; foreach (var i in _icons.Values) i.Dispose(); _icons.Clear(); _lastSig = ""; }
 
+            string iconState = blocked ? "blocked" : view.IconState;
+
             // Tooltip carries the elapsed timer (FR3) — time-dependent, so set it every tick (cheap).
-            string tooltip = view.Tooltip;
-            if (_cfg.ShowTimer && (view.TopState == "thinking" || view.TopState == "tool") && view.TopStartedAt > 0)
+            string tooltip;
+            if (blocked) tooltip = $"Session limit — resets {_resetText}";
+            else
             {
-                string t = $" ({Model.Elapsed(view.TopStartedAt, DateTimeOffset.UtcNow.ToUnixTimeSeconds())})";
-                tooltip = (view.Tooltip + t) is { Length: <= 63 } s ? s : view.Tooltip;
+                tooltip = view.Tooltip;
+                if (_cfg.ShowTimer && (view.TopState == "thinking" || view.TopState == "tool") && view.TopStartedAt > 0)
+                {
+                    string t = $" ({Model.Elapsed(view.TopStartedAt, DateTimeOffset.UtcNow.ToUnixTimeSeconds())})";
+                    tooltip = (view.Tooltip + t) is { Length: <= 63 } s ? s : view.Tooltip;
+                }
             }
             _icon.Text = tooltip;
 
             // Icon swaps every tick while working so the animation runs even when nothing else
             // changed (400ms/frame ≈ 2.5fps — deliberately low, per the animation-cost risk).
-            bool working = view.IconState is "thinking" or "tool";
+            bool working = iconState is "thinking" or "tool";
             _frame = working ? (_frame + 1) % AnimFrames : 0;
-            _icon.Icon = IconFor(view.IconState, view.TopProvider, _frame);
+            _icon.Icon = IconFor(iconState, view.TopProvider, _frame);
 
-            var started = live.Where(s => s.Started).OrderByDescending(s => Model.Priority(s.State)).ToList();
-            UpdatePill(started.Count > 0 ? started[0] : null);
+            UpdatePill(top, _resetText);
+
+            if (blocked && !_resetNotified)
+            {
+                Notify("Session limit reached", $"Resets {_resetText}", ToolTipIcon.Warning, Chime.Kind.Permission, top?.Pid ?? 0);
+                _resetNotified = true;
+            }
 
             // The menu is structural — rebuild only when the session set/states change (idle-cheap).
-            string sig = view.IconState + "|" + string.Join(";", started.Select(s => s.SessionId + s.State));
+            string sig = iconState + "|" + string.Join(";", started.Select(s => s.SessionId + s.State));
             if (sig == _lastSig) return;
             _lastSig = sig;
 
@@ -289,21 +316,32 @@ static class Program
             menu.Items.Add(new ToolStripMenuItem("Exit", null, (_, _) => { _icon.Visible = false; Application.Exit(); }));
         }
 
-        // Refresh (or hide) the floating status pill from the top session.
-        void UpdatePill(Session? top)
+        // Refresh (or hide) the floating status pill. A session-limit reset (resetText) overrides
+        // everything — it's the most important thing to see when it's happening.
+        void UpdatePill(Session? top, string? resetText)
         {
-            if (!_cfg.ShowPill || top is null)
+            if (!_cfg.ShowPill || (top is null && resetText is null))
             {
                 if (_pill.Visible) _pill.Hide();
                 return;
             }
-            string label = string.IsNullOrEmpty(top.Label) ? top.State : top.Label;
-            string text = string.IsNullOrEmpty(top.Project) ? label : $"{label} · {top.Project}";
-            if (_cfg.ShowTimer && top.State is "thinking" or "tool" && top.StartedAt > 0)
-                text += " · " + Model.Elapsed(top.StartedAt, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
-            text = $"[{Model.Tag(top.Provider)}] {text}";
+            string text; Color color;
+            if (resetText is not null)
+            {
+                text = $"Session limit · resets {resetText}";
+                color = StateColor("blocked", "Claude", _cfg.IconColor, _lastLight);
+            }
+            else
+            {
+                string label = string.IsNullOrEmpty(top!.Label) ? top.State : top.Label;
+                text = string.IsNullOrEmpty(top.Project) ? label : $"{label} · {top.Project}";
+                if (_cfg.ShowTimer && top.State is "thinking" or "tool" && top.StartedAt > 0)
+                    text += " · " + Model.Elapsed(top.StartedAt, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+                text = $"[{Model.Tag(top.Provider)}] {text}";
+                color = StateColor(top.State, top.Provider, _cfg.IconColor, _lastLight);
+            }
 
-            _pill.SetStatus(text, StateColor(top.State, top.Provider, _cfg.IconColor, _lastLight), _lastLight);
+            _pill.SetStatus(text, color, _lastLight);
             // Dragged? honor the saved spot. Otherwise dock to the taskbar, re-anchored each tick so
             // the right edge stays pinned by the clock as the label width changes.
             _pill.Location = _cfg.PillX >= 0
@@ -451,6 +489,7 @@ static class Program
             : Color.SlateGray;
         return state switch
         {
+            "blocked" => Color.Crimson,      // hit the session limit
             "permission" => Color.Gold,
             "thinking" or "tool" => BrandColor(provider),
             "done" => Color.MediumSeaGreen,
@@ -627,6 +666,54 @@ static class Program
         catch { /* best-effort; some terminals expose no focusable window */ }
     }
 
+    // ---- session-limit / reset-time detection (from the transcript tail) ----
+    // Local files carry the reset time only once you've hit the limit: Claude Code appends a
+    // rate_limit / "session limit · resets <clock>" record near the tail of the session transcript.
+    static readonly System.Text.RegularExpressions.Regex ResetRe =
+        new(@"resets\s+(\d{1,2}:\d{2}\s*[ap]m)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    // Returns the reset clock (e.g. "2:30pm") if the transcript tail shows an active rate-limit hit,
+    // else null. Reads only the last 16 KB and scans the last handful of lines.
+    static string? DetectResetTime(string? transcript)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(transcript) || !File.Exists(transcript)) return null;
+            using var fs = new FileStream(transcript, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            int want = (int)Math.Min(fs.Length, 16 * 1024);
+            fs.Seek(-want, SeekOrigin.End);
+            var buf = new byte[want];
+            int read = fs.Read(buf, 0, want);
+            var lines = System.Text.Encoding.UTF8.GetString(buf, 0, read).Split('\n');
+            for (int i = lines.Length - 1, seen = 0; i >= 0 && seen < 12; i--)
+            {
+                var line = lines[i];
+                if (line.Length == 0) continue;
+                seen++;
+                if (!line.Contains("rate_limit") && !line.Contains("session limit")) continue;
+                var m = ResetRe.Match(line);
+                if (!m.Success) return null;
+                var clock = m.Groups[1].Value;
+                return ResetPassed(clock) ? null : clock; // hide once the window has reset
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    // True if the reset clock is in the past (window already refreshed). >12h in the past is treated
+    // as tomorrow (handles a late-night hit that resets after midnight).
+    static bool ResetPassed(string clock)
+    {
+        if (!DateTime.TryParseExact(clock.ToUpperInvariant().Replace(" ", ""), "h:mmtt",
+                System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var t))
+            return false; // unparseable -> keep showing it
+        var reset = DateTime.Now.Date + t.TimeOfDay;
+        var delta = DateTime.Now - reset;
+        if (delta > TimeSpan.FromHours(12)) return false; // reset is actually next-day
+        return delta > TimeSpan.FromMinutes(2);           // passed (small grace)
+    }
+
     // ---- event chimes: synthesized WAVs, no bundled asset, no license question. Distinct per event. ----
     static class Chime
     {
@@ -787,6 +874,15 @@ static class Program
             var wav = typeof(Chime).GetField(fld, System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetValue(null) as byte[];
             Check(wav is not null && wav.Length > 44 && wav[0] == (byte)'R' && wav[8] == (byte)'W', $"{fld} chime is a non-empty RIFF/WAVE buffer");
         }
+
+        // Session-limit reset parsing: regex extraction + past/future expiry.
+        var rm = ResetRe.Match("...\"error\":\"rate_limit\"... you've hit your session limit · resets 2:30pm (Asia/Calcutta)");
+        Check(rm.Success && rm.Groups[1].Value == "2:30pm", "reset clock parses from a rate_limit line");
+        var soon = DateTime.Now.AddHours(2).ToString("h:mmtt").ToLowerInvariant();
+        var ago = DateTime.Now.AddHours(-2).ToString("h:mmtt").ToLowerInvariant();
+        Check(!ResetPassed(soon), "a reset 2h from now is not yet passed");
+        Check(ResetPassed(ago), "a reset 2h ago is passed");
+        Check(!ResetPassed("garbage"), "unparseable clock => keep showing (not passed)");
 
         Console.WriteLine("selftest OK");
         return 0;
