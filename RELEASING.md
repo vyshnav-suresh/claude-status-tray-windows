@@ -81,8 +81,32 @@ Start-Process "$env:LOCALAPPDATA\ClaudeStatusTray\ClaudeStatusTray.exe"
 
 ---
 
+## Code signing (optional)
+
+`build.ps1` signs the exe automatically **if** a certificate is configured via env vars,
+otherwise it ships unsigned:
+
+```powershell
+# EV certificate (hardware token / cert store) — grants immediate SmartScreen trust
+$env:CSC_THUMBPRINT = 'AB12CD...'          # thumbprint from certmgr / the token
+.\build.ps1
+
+# OV certificate (.pfx file) — signs, but SmartScreen clears only after reputation accrues
+$env:CSC_PFX = 'C:\path\cert.pfx'
+$env:CSC_PFX_PASSWORD = '...'
+.\build.ps1
+```
+
+Or sign an already-built exe directly with `.\sign.ps1` (see its header for args). Signing
+uses SHA-256 with an RFC3161 timestamp so the signature survives cert expiry.
+
+**Reality check:** signing does not by itself remove the SmartScreen "unknown publisher"
+prompt. An **OV** signature must build download reputation over time; only an **EV**
+certificate grants immediate trust. Both require buying a cert from a CA (DigiCert, Sectigo,
+…) and passing identity verification. There is no free path.
+
+---
+
 **Notes**
-- The exe is unsigned; users see a SmartScreen "unknown publisher" prompt on first run.
-  Code-signing (Authenticate) would remove it — not currently set up.
 - Trimming is disabled (WinForms + reflection); compression is the only size lever, already
   on in `build.ps1`.
