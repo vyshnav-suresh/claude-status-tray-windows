@@ -159,7 +159,7 @@ static class Program
             path.AddArc(w - d, h - d, d, d, 0, 90); path.AddArc(0, h - d, d, d, 90, 90);
             path.CloseFigure();
             using (var bg = new SolidBrush(BackColor)) g.FillPath(bg, path);
-            using (var dot = new SolidBrush(_dot)) g.FillEllipse(dot, 9, Height / 2 - 5, 10, 10);
+            DrawSpark(g, 14f, Height / 2f, 2f, 6f, _dot, 8, 0, 1.6f);
             using (var tb = new SolidBrush(_fore)) g.DrawString(_text, Font, tb, 23, (Height - Font.Height) / 2f);
         }
     }
@@ -411,6 +411,19 @@ static class Program
         };
     }
 
+    // Claude-style spark: tapered blades radiating from a center gap. Rotating it animates a spin.
+    // Stylized/programmatic — swap for an official asset by loading a .ico if you ship one.
+    public static void DrawSpark(Graphics g, float cx, float cy, float rInner, float rOuter, Color c, int rays, double rotDeg, float thick)
+    {
+        using var pen = new Pen(c, thick) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+        for (int i = 0; i < rays; i++)
+        {
+            double a = (rotDeg + i * (360.0 / rays)) * Math.PI / 180.0;
+            float dx = (float)Math.Cos(a), dy = (float)Math.Sin(a);
+            g.DrawLine(pen, cx + dx * rInner, cy + dy * rInner, cx + dx * rOuter, cy + dy * rOuter);
+        }
+    }
+
     static Icon MakeIcon(string state, int frame, string iconColor, bool lightTaskbar)
     {
         Color c = StateColor(state, iconColor, lightTaskbar);
@@ -419,22 +432,13 @@ static class Program
         {
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.Clear(Color.Transparent);
-            using var b = new SolidBrush(c);
-            g.FillEllipse(b, 3, 3, 10, 10);
-            if (state is "thinking" or "tool")
-            {
-                // Satellite at N/E/S/W by frame — reads as motion across ticks.
-                (int dx, int dy) = (frame % AnimFrames) switch
-                {
-                    0 => (5, 0), 1 => (10, 5), 2 => (5, 10), _ => (0, 5),
-                };
-                using var sat = new SolidBrush(Color.White);
-                g.FillEllipse(sat, dx, dy, 6, 6);
-            }
-            else if (state == "permission")
+            // Spin only while working; 45°/AnimFrames per frame wraps seamlessly (8 rays => 45° spacing).
+            double rot = state is "thinking" or "tool" ? frame * (45.0 / AnimFrames) : 0;
+            DrawSpark(g, 8f, 8f, 2.3f, 7.3f, c, 8, rot, 1.8f);
+            if (state == "permission")
             {
                 using var badge = new SolidBrush(Color.OrangeRed);
-                g.FillEllipse(badge, 9, 0, 7, 7);
+                g.FillEllipse(badge, 10, 0, 6, 6); // urgency dot
             }
         }
         IntPtr h = bmp.GetHicon();
