@@ -4,7 +4,12 @@ $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-    throw "Node.js is required (the hooks run under it). Install Node and re-run."
+    throw "Node.js is required (the hooks run under it). Get it from https://nodejs.org and re-run."
+}
+if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
+    throw "The .NET 9 SDK is required to build the app. Install it with:`n" +
+          "  winget install Microsoft.DotNet.SDK.9`n" +
+          "...then re-run. (Or download the prebuilt release zip instead - see the README.)"
 }
 
 # 1. Build the exe if it isn't there yet.
@@ -16,6 +21,7 @@ $dest = Join-Path $env:LOCALAPPDATA 'ClaudeStatusTray'
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
 $installed = Join-Path $dest 'ClaudeStatusTray.exe'
 Get-Process ClaudeStatusTray -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Milliseconds 500   # let the file handle release before we overwrite
 Copy-Item $exe $installed -Force
 
 # 3. Wire the Claude Code hooks (merges into ~/.claude/settings.json, backs it up, quotes paths).

@@ -57,15 +57,17 @@ The zip bundles the prebuilt exe, so its `install.ps1` just copies the exe to `%
 
 The tray dot appears near the clock and reacts the moment you start or continue a Claude Code session.
 
-## Install from source
+## Install from source (clone + one command)
 
-For contributors. **This path requires the .NET 9 SDK** — the repo's `install.ps1` compiles the exe first (if `dotnet` is missing you'll get `'dotnet' is not recognized`; use the release above instead, or install the SDK).
+Clone the repo and run one script — it builds the exe, wires the hooks, registers autostart, and launches, all in one step:
 
 ```powershell
 git clone https://github.com/vyshnav-suresh/claude-status-tray-windows.git
 cd claude-status-tray-windows
-.\install.ps1     # builds via build.ps1, then installs
+powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
+
+`-ExecutionPolicy Bypass` gets past PowerShell's block on unsigned scripts (single run, no system change). **Requires the [.NET 9 SDK](https://dotnet.microsoft.com/download)** (`winget install Microsoft.DotNet.SDK.9`) to compile, plus Node.js — `install.ps1` checks for both and tells you if either is missing. Re-run anytime to update.
 
 ### Uninstall
 
