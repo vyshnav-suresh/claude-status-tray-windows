@@ -89,6 +89,7 @@ sealed class Settings
     public int PillX { get; set; } = -1;                     // saved pill position (-1 = default bottom-right)
     public int PillY { get; set; } = -1;
     public bool Notifications { get; set; } = true;          // desktop balloon toasts per event
+    public string PillDock { get; set; } = "Right";          // taskbar dock side: "Left" | "Right"
 }
 
 static class Program
@@ -304,8 +305,18 @@ static class Program
                 }) { Checked = _cfg.IconColor == m });
             }
             var pill = new ToolStripMenuItem("Show status label", null, (_, _) => { _cfg.ShowPill = !_cfg.ShowPill; SaveSettings(_cfg); if (!_cfg.ShowPill) _pill.Hide(); }) { Checked = _cfg.ShowPill };
+            var pillPos = new ToolStripMenuItem("Label position");
+            foreach (var side in new[] { "Left", "Right" })
+            {
+                var sd = side;
+                pillPos.DropDownItems.Add(new ToolStripMenuItem(sd, null, (_, _) =>
+                {
+                    _cfg.PillDock = sd; _cfg.PillX = -1; _cfg.PillY = -1; SaveSettings(_cfg); // clear drag -> re-dock
+                }) { Checked = _cfg.PillDock == sd });
+            }
             var autoUpd = new ToolStripMenuItem("Check for updates at startup", null, (_, _) => { _cfg.AutoUpdateCheck = !_cfg.AutoUpdateCheck; SaveSettings(_cfg); }) { Checked = _cfg.AutoUpdateCheck };
             menu.Items.Add(pill);
+            menu.Items.Add(pillPos);
             menu.Items.Add(timer);
             menu.Items.Add(notify);
             menu.Items.Add(sound);
@@ -346,7 +357,7 @@ static class Program
             // the right edge stays pinned by the clock as the label width changes.
             _pill.Location = _cfg.PillX >= 0
                 ? new Point(_cfg.PillX, _cfg.PillY)
-                : TaskbarDockLocation(_pill.Width, _pill.Height);
+                : TaskbarDockLocation(_pill.Width, _pill.Height, _cfg.PillDock == "Left");
             if (!_pill.Visible) _pill.Show();
         }
 
@@ -616,7 +627,7 @@ static class Program
     // Place the pill on the primary taskbar, right-anchored just left of the notification area
     // (the reliably-empty strip next to the clock) and vertically centered in the taskbar. Falls
     // back to floating above the tray if the taskbar can't be located (autohide, unusual shell).
-    public static Point TaskbarDockLocation(int width, int height)
+    public static Point TaskbarDockLocation(int width, int height, bool dockLeft)
     {
         try
         {
@@ -625,13 +636,16 @@ static class Program
             if (tray != IntPtr.Zero && notify != IntPtr.Zero && GetWindowRect(tray, out var tb) && GetWindowRect(notify, out var nt))
             {
                 int y = tb.Top + ((tb.Bottom - tb.Top) - height) / 2;
-                int x = nt.Left - width - 8;
-                if (x > tb.Left) return new Point(x, y);
+                // Left: after the Start/Widgets cluster on the far left. Right: just left of the clock.
+                int x = dockLeft ? tb.Left + 180 : nt.Left - width - 8;
+                if (x > tb.Left && x + width < nt.Left) return new Point(x, y);
             }
         }
         catch { }
         var wa = Screen.PrimaryScreen!.WorkingArea;
-        return new Point(wa.Right - width - 12, wa.Bottom - height - 12);
+        return dockLeft
+            ? new Point(wa.Left + 180, wa.Bottom - height - 12)
+            : new Point(wa.Right - width - 12, wa.Bottom - height - 12);
     }
 
     static int ParentPid(Process p)
