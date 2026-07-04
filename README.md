@@ -101,7 +101,7 @@ Right-click the tray icon. Choices persist to `%USERPROFILE%\.claude\statusbar\s
 
 The **consumer side is done**: the tray displays any Antigravity session that writes `%USERPROFILE%\.antigravity\statusbar\state.d\*.json`, tagged `[A]` and colored blue.
 
-The **publisher side is not built**. Antigravity is a VS Code fork with no Claude-Code-style hooks and no agent API to hook into; its agent state lives in an undocumented internal SQLite store, not viable to reverse-engineer. So nothing writes those files yet. Two things do work today: running **Claude Code inside Antigravity** (its extension is installed) is tracked via the normal hooks, and a clean extension-based publisher becomes possible if/when Antigravity exposes an agent API. See [`antigravity_integration_plan.md`](antigravity_integration_plan.md).
+The **publisher side is not built**. Antigravity is a VS Code fork with no Claude-Code-style hooks and no agent API to hook into; its agent state lives in an undocumented internal SQLite store, not viable to reverse-engineer. So nothing writes those files yet. Two things do work today: running **Claude Code inside Antigravity** (its extension is installed) is tracked via the normal hooks, and a clean extension-based publisher becomes possible if/when Antigravity exposes an agent API. See [antigravity_integration_plan.md](antigravity_integration_plan.md).
 
 ## Project layout
 
@@ -112,6 +112,11 @@ build.ps1       publish the single-file exe
 install.ps1     build + wire hooks + autostart + launch
 uninstall.ps1   tear it all down
 ```
+
+### 📄 Project Documents
+- [Project Evaluation & Scorecard](project_evaluation.md) — Architectural analysis, scorecards, and design tradeoffs.
+- [Antigravity Integration Plan](antigravity_integration_plan.md) — Future implementation plan to link the publisher-side of Antigravity.
+- [Proposed Features & Roadmap](proposed_features.md) — Upcoming features backlog (toast notifications, custom chime wave profiles, process killer).
 
 Run the app's self-checks with `dotnet run --project app -- --selftest`.
 

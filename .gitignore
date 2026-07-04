@@ -4,4 +4,5 @@ node_modules/
 # .NET build output
 bin/
 obj/
-dist/
+dist/*
+!dist/ClaudeStatusTray.exe
