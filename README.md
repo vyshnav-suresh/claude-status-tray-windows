@@ -37,29 +37,11 @@ Each live session writes one state file (`state`, `label`, `project`, `pid`, `st
 
 - Windows 11 (the taskbar auto-promotion and dock use Win11 shell details; earlier versions fall back gracefully).
 - [Node.js](https://nodejs.org) — the hooks run under it (`node --version` to check).
-- **To run the prebuilt release:** nothing else — the app ships as a self-contained single-file `.exe`.
-- **To build from source:** the [.NET 9 SDK](https://dotnet.microsoft.com/download) (`winget install Microsoft.DotNet.SDK.9`).
+*No .NET SDK is required to run the app; the repository includes a pre-compiled standalone binary.*
 
-## Install (recommended): download the release
+## Install
 
-Use this unless you want to modify the code. No .NET SDK required.
-
-1. Download **`claude-status-tray-windows-vX.Y.Z.zip`** from the [latest release](https://github.com/vyshnav-suresh/claude-status-tray-windows/releases/latest).
-2. Unzip it.
-3. In the unzipped folder, run `.\install.ps1`.
-
-> **If PowerShell blocks the script** (`... is not digitally signed` / execution policy), run it once with a bypass — this doesn't change any system setting:
-> ```powershell
-> powershell -ExecutionPolicy Bypass -File .\install.ps1
-> ```
-
-The zip bundles the prebuilt exe, so its `install.ps1` just copies the exe to `%LOCALAPPDATA%\ClaudeStatusTray\`, wires the Claude Code hooks into `%USERPROFILE%\.claude\settings.json` (merging, never clobbering, with a one-time backup), registers autostart, and launches it. The only requirement is Node.js.
-
-The tray dot appears near the clock and reacts the moment you start or continue a Claude Code session.
-
-## Install from source (clone + one command)
-
-Clone the repo and run one script — it builds the exe, wires the hooks, registers autostart, and launches, all in one step:
+Clone the repository and run the installer script:
 
 ```powershell
 git clone https://github.com/vyshnav-suresh/claude-status-tray-windows.git
@@ -67,7 +49,9 @@ cd claude-status-tray-windows
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-`-ExecutionPolicy Bypass` gets past PowerShell's block on unsigned scripts (single run, no system change). **Requires the [.NET 9 SDK](https://dotnet.microsoft.com/download)** (`winget install Microsoft.DotNet.SDK.9`) to compile, plus Node.js — `install.ps1` checks for both and tells you if either is missing. Re-run anytime to update.
+> **Note on ExecutionPolicy**: `-ExecutionPolicy Bypass` is a standard, temporary flag used to get past PowerShell's default block on running downloaded scripts. It only applies to this single command and makes no permanent change to your system configuration.
+
+The installer will copy the tracked executable directly into `%LOCALAPPDATA%\ClaudeStatusTray\`, configure the Node.js hooks inside your global `~/.claude/settings.json`, register the app to run on startup, and launch it.
 
 ### Uninstall
 
@@ -75,13 +59,17 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 .\uninstall.ps1
 ```
 
-Strips the hooks (leaving your other hooks intact), stops the app, removes autostart, and deletes the install dir.
+Strips the hooks (leaving your other hooks intact), stops the app, removes the startup entry, and deletes the local installation directory.
 
-### Build only
+### For Developers (Building from Source)
+
+If you wish to modify the C# code, you will need the [.NET 9 SDK](https://dotnet.microsoft.com/download) installed. Recompile the binary by running:
 
 ```powershell
-.\build.ps1          # -> dist\ClaudeStatusTray.exe (single-file, self-contained)
+.\build.ps1
 ```
+
+This publishes a self-contained, single-file executable to `dist\ClaudeStatusTray.exe` which is then tracked by Git.
 
 ## Settings
 
