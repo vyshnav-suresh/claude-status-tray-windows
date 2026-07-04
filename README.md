@@ -2,7 +2,8 @@
 
 A lightweight Windows system-tray indicator for AI coding agents. It shows — at a glance, on your taskbar — what Claude Code (and Antigravity) is doing right now: thinking, running a tool, awaiting your permission, or done, plus the elapsed time of the current turn and desktop notifications for the moments that matter.
 
-![ClaudeStatusTray — tray icon states and taskbar pills](assets/image.png)
+![The tray icon live on the Windows taskbar](assets/image.png)
+
 ![ClaudeStatusTray — tray icon states and taskbar pills](assets/preview.png)
 
 
@@ -35,20 +36,31 @@ Each live session writes one state file (`state`, `label`, `project`, `pid`, `st
 ## Requirements
 
 - Windows 11 (the taskbar auto-promotion and dock use Win11 shell details; earlier versions fall back gracefully).
-- [Node.js](https://nodejs.org) — the hooks run under it.
-- No .NET runtime needed: the app ships as a self-contained single-file `.exe`.
+- [Node.js](https://nodejs.org) — the hooks run under it (`node --version` to check).
+- **To run the prebuilt release:** nothing else — the app ships as a self-contained single-file `.exe`.
+- **To build from source:** the [.NET 9 SDK](https://dotnet.microsoft.com/download) (`winget install Microsoft.DotNet.SDK.9`).
 
-## Install
+## Install (recommended): download the release
+
+Use this unless you want to modify the code. No .NET SDK required.
+
+1. Download **`claude-status-tray-windows-vX.Y.Z.zip`** from the [latest release](https://github.com/vyshnav-suresh/claude-status-tray-windows/releases/latest).
+2. Unzip it.
+3. In the unzipped folder, run `.\install.ps1`.
+
+The zip bundles the prebuilt exe, so its `install.ps1` just copies the exe to `%LOCALAPPDATA%\ClaudeStatusTray\`, wires the Claude Code hooks into `%USERPROFILE%\.claude\settings.json` (merging, never clobbering, with a one-time backup), registers autostart, and launches it. The only requirement is Node.js.
+
+The tray dot appears near the clock and reacts the moment you start or continue a Claude Code session.
+
+## Install from source
+
+For contributors. **This path requires the .NET 9 SDK** — the repo's `install.ps1` compiles the exe first (if `dotnet` is missing you'll get `'dotnet' is not recognized`; use the release above instead, or install the SDK).
 
 ```powershell
 git clone https://github.com/vyshnav-suresh/claude-status-tray-windows.git
 cd claude-status-tray-windows
-.\install.ps1
+.\install.ps1     # builds via build.ps1, then installs
 ```
-
-`install.ps1` builds the exe, copies it to `%LOCALAPPDATA%\ClaudeStatusTray\`, wires the Claude Code hooks into `%USERPROFILE%\.claude\settings.json` (merging, never clobbering, with a one-time backup), registers autostart, and launches it. Re-runnable.
-
-The tray dot appears near the clock. It reacts the moment you start or continue a Claude Code session.
 
 ### Uninstall
 
