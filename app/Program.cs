@@ -285,12 +285,12 @@ static class Program
                 text += " · " + Model.Elapsed(top.StartedAt, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
 
             _pill.SetStatus(text, StateColor(top.State, _cfg.IconColor, _lastLight), _lastLight);
-            if (!_pill.Visible)
-            {
-                if (_cfg.PillX >= 0) _pill.Location = new Point(_cfg.PillX, _cfg.PillY);
-                else { var wa = Screen.PrimaryScreen!.WorkingArea; _pill.Location = new Point(wa.Right - _pill.Width - 12, wa.Bottom - _pill.Height - 12); }
-                _pill.Show();
-            }
+            // Dragged? honor the saved spot. Otherwise dock to the taskbar, re-anchored each tick so
+            // the right edge stays pinned by the clock as the label width changes.
+            _pill.Location = _cfg.PillX >= 0
+                ? new Point(_cfg.PillX, _cfg.PillY)
+                : TaskbarDockLocation(_pill.Width, _pill.Height);
+            if (!_pill.Visible) _pill.Show();
         }
 
         // Fire the completion chime once per session as it transitions into `done`.
@@ -517,6 +517,32 @@ static class Program
     [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
     [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
     const int SW_RESTORE = 9;
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr FindWindow(string cls, string? win);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string? win);
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+    struct RECT { public int Left, Top, Right, Bottom; }
+
+    // Place the pill on the primary taskbar, right-anchored just left of the notification area
+    // (the reliably-empty strip next to the clock) and vertically centered in the taskbar. Falls
+    // back to floating above the tray if the taskbar can't be located (autohide, unusual shell).
+    public static Point TaskbarDockLocation(int width, int height)
+    {
+        try
+        {
+            var tray = FindWindow("Shell_TrayWnd", null);
+            var notify = FindWindowEx(tray, IntPtr.Zero, "TrayNotifyWnd", null);
+            if (tray != IntPtr.Zero && notify != IntPtr.Zero && GetWindowRect(tray, out var tb) && GetWindowRect(notify, out var nt))
+            {
+                int y = tb.Top + ((tb.Bottom - tb.Top) - height) / 2;
+                int x = nt.Left - width - 8;
+                if (x > tb.Left) return new Point(x, y);
+            }
+        }
+        catch { }
+        var wa = Screen.PrimaryScreen!.WorkingArea;
+        return new Point(wa.Right - width - 12, wa.Bottom - height - 12);
+    }
 
     static int ParentPid(Process p)
     {
