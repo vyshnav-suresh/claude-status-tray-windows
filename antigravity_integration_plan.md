@@ -103,3 +103,19 @@ Extend the `--selftest` suite in [Program.cs](file:///c:/Users/Vyshnav%20Suresh/
 ### Manual Verification
 1. Create a dummy state file in `%USERPROFILE%\.antigravity\statusbar\state.d\test.json` with state set to `thinking`.
 2. Verify that the Windows tray app displays the running Antigravity session and formats the tooltip/menu correctly.
+
+---
+
+## 📌 Status & Findings (2026-07-04)
+
+**Consumer side: DONE and shipped.** The tray polls both `.claude` and `.antigravity` `state.d` dirs, tags sessions `[C]`/`[A]`, colors working states by brand (Claude orange, Antigravity blue), resolves priority across providers, and shows origin in the tooltip/menu/pill. Verified live with a dummy `.antigravity` permission session overriding a live Claude session. The moment anything writes `.antigravity\statusbar\state.d`, Antigravity appears with no further tray changes.
+
+**Publisher side: PARKED — not viable to build now.** Investigation of the running Antigravity IDE (a VS Code fork):
+- It has **no Claude-Code-style hooks** and exposes **no agent lifecycle API** to extensions. Installed extensions are language tooling + `anthropic.claude-code`.
+- The active profile is `%APPDATA%\Antigravity IDE\` (with the space), not `%APPDATA%\Antigravity\`.
+- Its agent logs (`logs\*\window*\exthost\google.antigravity\Antigravity IDE.log`) carry **only** startup lines and a ~6-min API heartbeat (`fetchAvailableModels`/`loadCodeAssist`) — **no** thinking/tool/approval/done states. Log-tailing is a dead end.
+- Agent turn/step state lives in an internal **proto + SQLite "trajectory store"** (log: `Creating trajectory store manager with proto store and SQLite store`), managed by its Go language-server. Undocumented schema, WAL-locked while running, and would break on any IDE update. Reading it is fragile reverse-engineering — deliberately not built.
+
+**Usable today / next steps:**
+- Running **Claude Code inside Antigravity** (the extension is installed) already writes `.claude\statusbar` → tracked now.
+- Revisit a clean extension-based publisher **if/when Antigravity exposes an agent API**.
