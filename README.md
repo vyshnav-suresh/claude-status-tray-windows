@@ -116,6 +116,10 @@ If this saves you from missing permission prompts, you can buy me a coffee ☕
 
 <img src="assets/qr-code.png" alt="Buy Me a Coffee QR code" width="180">
 
+## License
+
+[MIT](LICENSE).
+
 ## Credits
 
 Ported from [m1ckc3s/claude-status-bar](https://github.com/m1ckc3s/claude-status-bar). The hook scripts and state-file contract originate there; please refer to that project for the hooks' license.
