@@ -108,6 +108,14 @@ uninstall.ps1   tear it all down
 
 Run the app's self-checks with `dotnet run --project app -- --selftest`.
 
+## Support
+
+If this saves you from missing permission prompts, you can buy me a coffee ☕
+
+**[buymeacoffee.com/vyshnavofck](https://buymeacoffee.com/vyshnavofck)**
+
+<img src="assets/qr-code.png" alt="Buy Me a Coffee QR code" width="180">
+
 ## Credits
 
 Ported from [m1ckc3s/claude-status-bar](https://github.com/m1ckc3s/claude-status-bar). The hook scripts and state-file contract originate there; please refer to that project for the hooks' license.
